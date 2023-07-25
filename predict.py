@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import torch
+from model import ModelForRegression
 from transformers import BertTokenizer
 from torch.utils.data import TensorDataset,DataLoader
 from torch.utils.data import SequentialSampler
@@ -85,7 +86,7 @@ if __name__ == "__main__":
     output_file = "./submission.csv"
 
     bert_model_name = 'bert-base-uncased'
-    model = BertForRegression(bert_model_name)
+    model = ModelForRegression(bert_model_name)
     model.load_state_dict(torch.load("/kaggle/input/student/best_model.pt"))
     model.cuda()
 

@@ -35,7 +35,7 @@ def preprocess_data(data_dir1, data_dir2, train_save_file=None, val_save_file=No
         # 对句子进行分词，并创建输入张量
         input_ids = []
         attention_masks = []
-
+        
         for sent in sentences:
             encoded_dict = tokenizer.encode_plus(
                 sent,

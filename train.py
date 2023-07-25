@@ -2,12 +2,28 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from transformers import BertTokenizer
-from preprocess import preprocess_data
-from model import BertForRegression
+from preprocessV2 import preprocess_data,tokenize_and_save_csv
+import argparse
+import os
+from model import ModelForRegression
+from dataset import load_data
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    AutoConfig,
+    set_seed,
+    Trainer,
+    TrainingArguments,
+    HfArgumentParser,
+    DataCollatorWithPadding,
+)
+from config import Config
 import time
 import datetime
 import numpy as np
+
+
 
 def format_time(elapsed):
     '''
@@ -19,43 +35,45 @@ def format_time(elapsed):
     # 格式化为 hh:mm:ss
     return str(datetime.timedelta(seconds=elapsed_rounded))
 
-data_dir1 = "./data/prompts_train.csv"
-data_dir2 = "./data/summaries_train.csv"
-train_save_file = "./data/train_dataset.pt"
-val_save_file = "./data/val_dataset.pt"
+def train_model(model, optimizer, criterion, num_epochs, folds,input_dir,checkpoints_dir,batch_size):
+    
+    # 初始化 total_mcrmse 用于累加每个折叠的 mcrmse
+    total_mcrmse = 0
+    os.makedirs(checkpoints_dir, exist_ok=True)  
+    # 对每个折叠进行循环
+    for fold in range(folds):
+        train_dataset,val_dataset = load_data(fold,folds,input_dir)
 
-batch_size = 16
-train_dataset,val_dataset = preprocess_data(data_dir1,data_dir2,train_save_file,val_save_file)
-#train_dataset,val_dataset = preprocess_data(data_dir1,data_dir2)
-# 为训练和验证集创建 Dataloader，对训练样本随机洗牌
-train_dataloader = DataLoader(
+        # 为训练和验证集创建 Dataloader，对训练样本随机洗牌
+        train_dataloader = DataLoader(
             train_dataset,  # 训练样本
             sampler = RandomSampler(train_dataset), # 随机小批量
             batch_size = batch_size, # 以小批量进行训练
+            drop_last=True
         )
 
-# 验证集不需要随机化，这里顺序读取就好
-validation_dataloader = DataLoader(
+        # 验证集不需要随机化，这里顺序读取就好
+        validation_dataloader = DataLoader(
             val_dataset, # 验证样本
             sampler = SequentialSampler(val_dataset), # 顺序选取小批量
-            batch_size = batch_size 
+            batch_size = batch_size ,
+            drop_last=True
         )
+        print("")
+        print('======== Folds {:} / {:} ========'.format(fold + 1, folds))
+        # 在当前折叠上进行训练和评估，并得到 mcrmse
+        mcrmse = train_single_fold(model, train_dataloader, validation_dataloader, optimizer, criterion, num_epochs, checkpoints_dir,fold)
 
-bert_model_name='bert-base-uncased'
-model=BertForRegression(bert_model_name)
-# 在 gpu 中运行该模型
-model.cuda()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=3e-5)
-num_epochs = 5
+        # 累加当前折叠的 mcrmse 到 total_mcrmse
+        total_mcrmse += mcrmse
 
-# 数据处理和加载
-train_texts = []
-train_content_scores = []
-train_wording_scores = []
+    # 计算平均 CV 得分
+    cv_score = total_mcrmse / folds
+    print("CV Score:", cv_score)
 
-def train_model(model, train_dataloader, validation_dataloader,optimizer, criterion, num_epochs):
+
+def train_single_fold(model, train_dataloader, validation_dataloader,optimizer, criterion, num_epochs,checkpoints_dir,fold):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     best_mcrmse = float('inf')
     model.train()
     for epoch in range(num_epochs):
@@ -135,7 +153,34 @@ def train_model(model, train_dataloader, validation_dataloader,optimizer, criter
         # 保存效果最好的模型
         if mcrmse < best_mcrmse:
             best_mcrmse = mcrmse
-            torch.save(model.state_dict(), "best_model.pt")
+            torch.save(model.state_dict(), f"{checkpoints_dir}/best_model_{fold}")
 
-# 开始训练
-train_model(model, train_dataloader,validation_dataloader,optimizer, criterion, num_epochs)
+    return best_mcrmse
+def main():
+    # 创建 ArgumentParser 并添加参数
+    parser = argparse.ArgumentParser()
+    # parser.add_argument("--model_name_or_path", type=str, default=None, help="Model name or path")
+    # parser.add_argument("--data_dir", type=str, default=None, help="Data directory")
+    # parser.add_argument("--max_seq_length", type=int, default=None, help="Max sequence length")
+    # parser.add_argument("--fold", type=int, default=None, help="Fold")
+    # 解析命令行参数并更新配置参数
+    args = parser.parse_args()
+
+    
+    CFG = Config(**vars(args))
+    preprocess_data(CFG.data_dir1,CFG.data_dir2,CFG.k_folds_dir,CFG.folds)
+
+    tokenizer = AutoTokenizer.from_pretrained(CFG.model_name_or_path)
+
+    tokenize_and_save_csv(tokenizer,CFG.k_folds_dir,CFG.k_folds_pt_dir,CFG.folds)
+
+    model = ModelForRegression(CFG.model_name_or_path,CFG.hidden_dim)
+    optimizer = optim.AdamW(model.parameters(), lr=CFG.learning_rate)
+    criterion = nn.MSELoss()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    # 开始训练
+    train_model(model, optimizer, criterion, CFG.num_train_epochs,CFG.folds,CFG.k_folds_pt_dir,CFG.checkpoints_dir,CFG.batch_size)
+
+if __name__ == "__main__":
+    main()
